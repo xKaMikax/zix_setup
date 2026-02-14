@@ -1,8 +1,10 @@
 #!/bin/bash
 
 # =================================================================
-VERSION="1.1.14"
-# ZIX ULTIMATE - THE UNBREAKABLE SETUP
+# VERSION="1.1.15"
+# ZIX ULTIMATE SMART SPEAKER - FULL EDITION
+# Стек: MPD, Spotify, AirPlay, Bluetooth, Voice Assistant (Wyoming)
+# Фишка: Умное подключение Bluetooth и корректный Systemd сервис
 # =================================================================
 
 GREEN='\033[0;32m'
@@ -10,95 +12,161 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-REPO_RAW_URL="https://raw.githubusercontent.com/xKaMikax/zix_setup/main/install.sh"
-LOCAL_FILE="install.sh"
+echo -e "${BLUE}--- Интеллектуальная система Zix v1.1.15 ---${NC}"
 
-echo -e "${BLUE}--- Интеллектуальная система Zix v$VERSION ---${NC}"
+# 1. ПОДГОТОВКА СИСТЕМЫ И УСТАНОВКА ПАКЕТОВ
+echo -e "${GREEN}[1/8] Обновление репозиториев и установка необходимых пакетов...${NC}"
+sudo apt update
+sudo apt install -y mpd mpc pulseaudio alsa-utils curl gmediarender \
+shairport-sync python3-pip python3-venv libasound2-dev \
+bluetooth bluez bluez-tools ffmpeg expect rfkill pulseaudio-module-bluetooth
 
-# 1. ОБНОВЛЕНИЕ
-REMOTE_VERSION=$(wget -qO- "$REPO_RAW_URL" | grep -m 1 "VERSION=" | cut -d'"' -f2)
-if [ ! -z "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION" != "$VERSION" ]; then
-    echo -e "${GREEN}Найдена новая версия $REMOTE_VERSION. Обновляюсь...${NC}"
-    wget -qO "$LOCAL_FILE" "$REPO_RAW_URL" && chmod +x "$LOCAL_FILE" && exec ./"$LOCAL_FILE"
-fi
-
-# 2. ПОДГОТОВКА СИСТЕМЫ
-echo -e "${GREEN}[1/8] Установка пакетов и чистка Bluetooth...${NC}"
-sudo apt update && sudo apt install -y mpd mpc pulseaudio alsa-utils curl \
-bluetooth bluez bluez-tools rfkill pulseaudio-module-bluetooth python3-venv
-
-# Жесткий сброс BT
-sudo systemctl stop bluetooth
+# Принудительная активация Bluetooth адаптера
 sudo rfkill unblock bluetooth
-sudo hciconfig hci0 down 2>/dev/null
-sudo hciconfig hci0 up 2>/dev/null
 sudo systemctl start bluetooth
-sleep 2
 sudo bluetoothctl power on
+sudo bluetoothctl agent on
+sudo bluetoothctl default-agent
 
-# 3. НАСТРОЙКА ЗВУКА
+# Запуск звукового сервера PulseAudio
+pulseaudio -k 2>/dev/null
+pulseaudio --start --exit-idle-time=-1
+
+# 2. ЦИКЛ ВЫБОРА И НАСТРОЙКИ ВЫВОДА ЗВУКА
 while true; do
-    echo -e "${BLUE}--- Вывод звука ---${NC}"
-    echo "1) Провод / HDMI"
+    echo -e "${BLUE}--- Настройка вывода звука ---${NC}"
+    echo "1) Проводной выход / USB / HDMI"
     echo "2) Bluetooth колонка"
-    read -p "Выбор: " OUT_TYPE
+    read -p "Твой выбор: " OUT_TYPE
 
     if [ "$OUT_TYPE" == "2" ]; then
-        # Проверка активного подключения
-        CONN_MAC=$(bluetoothctl devices Connected | awk '{print $2}')
-        if [ ! -z "$CONN_MAC" ]; then
-            echo -e "${GREEN}Колонка уже подключена! Использую текущую.${NC}"
-            BT_MAC=$CONN_MAC
-            OUT_DEVICE="pulse"
-        else
-            echo -e "${BLUE}Поиск (25 сек)... Включи Pairing Mode на колонке!${NC}"
-            sudo bluetoothctl scan on > /dev/null &
-            SCAN_PID=$!
-            for i in {25..1}; do echo -ne "Ищу... $i сек. \r"; sleep 1; done
-            kill $SCAN_PID 2>/dev/null
-            
-            devices=$(bluetoothctl devices)
-            if [ -z "$devices" ]; then echo -e "${RED}Пусто! Попробуем еще раз.${NC}"; continue; fi
-            
-            mapfile -t device_list <<< "$devices"
-            for i in "${!device_list[@]}"; do echo "$i) ${device_list[$i]}"; done
-            read -p "Выбери номер: " DEV_IN
-            BT_MAC=$(echo ${device_list[$DEV_IN]} | awk '{print $2}')
-            
-            bluetoothctl pair $BT_MAC && bluetoothctl trust $BT_MAC && bluetoothctl connect $BT_MAC
-            OUT_DEVICE="pulse"
+        echo -e "${BLUE}Запуск сканирования Bluetooth устройств (20 секунд)...${NC}"
+        echo -e "${BLUE}Убедись, что твоя колонка находится в режиме сопряжения (pairing mode)!${NC}"
+        
+        # Фоновое сканирование
+        sudo bluetoothctl scan on > /dev/null &
+        SCAN_PID=$!
+        for i in {20..1}; do
+            echo -ne "Поиск устройств... осталось $i сек. \r"
+            sleep 1
+        done
+        kill $SCAN_PID 2>/dev/null
+        echo -e "\n"
+
+        # Получение списка найденных устройств
+        devices=$(sudo bluetoothctl devices)
+        if [ -z "$devices" ]; then
+            echo -e "${RED}Устройства не найдены! Проверь колонку и попробуй снова.${NC}"
+            continue
         fi
+
+        echo -e "${GREEN}Список найденных устройств:${NC}"
+        mapfile -t device_list <<< "$devices"
+        for i in "${!device_list[@]}"; do
+            echo "$i) ${device_list[$i]}"
+        done
+
+        read -p "Выбери номер устройства для подключения: " DEV_INPUT
+        BT_MAC=$(echo ${device_list[$DEV_INPUT]} | awk '{print $2}')
+
+        echo -e "${BLUE}Анализ состояния устройства $BT_MAC...${NC}"
+        
+        # Проверка текущего статуса (сопряжено/доверенное)
+        IS_PAIRED=$(bluetoothctl info $BT_MAC | grep "Paired: yes")
+        IS_TRUSTED=$(bluetoothctl info $BT_MAC | grep "Trusted: yes")
+
+        # Если не в доверенных — добавляем
+        if [ -z "$IS_TRUSTED" ]; then
+            echo -e "${BLUE}Добавляю устройство в доверенные...${NC}"
+            bluetoothctl trust $BT_MAC
+        fi
+
+        # Если не сопряжено — спариваем, если сопряжено — пропускаем шаг pair
+        if [ -z "$IS_PAIRED" ]; then
+            echo -e "${BLUE}Выполняю сопряжение (pairing)...${NC}"
+            bluetoothctl pair $BT_MAC
+        else
+            echo -e "${GREEN}Устройство уже сопряжено. Пропускаю сопряжение...${NC}"
+        fi
+
+        # Финальный коннект
+        echo -e "${BLUE}Устанавливаю соединение...${NC}"
+        bluetoothctl connect $BT_MAC
+        
+        # Даем системе время инициализировать аудио-профиль
+        sleep 3
+        OUT_DEVICE="pulse"
     else
+        # Вывод списка звуковых карт для проводного подключения
         aplay -l | grep 'card'
-        read -p "Номер карты вывода (0, 1...): " CARD_ID
+        read -p "Введите НОМЕР карты вывода (обычно 0): " CARD_ID
         OUT_DEVICE="hw:$CARD_ID,0"
     fi
 
-    # Тест
-    speaker-test -t sine -f 440 -l 1 -d $OUT_DEVICE > /dev/null 2>&1 &
-    sleep 3
-    read -p "Слышал звук? (y/n/r): " T_ANS
-    [ "$T_ANS" == "y" ] && break
+    # ПЕТЛЯ ПРОВЕРКИ ЗВУКА
+    while true; do
+        echo -e "${BLUE}Внимание! Подаю звуковой сигнал (440Гц) на $OUT_DEVICE...${NC}"
+        speaker-test -t sine -f 440 -l 1 -d $OUT_DEVICE > /dev/null 2>&1 &
+        TEST_PID=$!
+        sleep 3
+        kill $TEST_PID 2>/dev/null
+
+        echo -e "${GREEN}Ты слышал звук из колонки?${NC}"
+        echo "y - Да, всё отлично"
+        echo "n - Нет, тишина (Вернуться к выбору типа устройства)"
+        echo "r - Не расслышал (Повторить сигнал)"
+        read -p "Твой ответ: " TEST_ANSWER
+
+        if [ "$TEST_ANSWER" == "y" ]; then
+            break 2 # Выход из всех циклов настройки звука
+        elif [ "$TEST_ANSWER" == "n" ]; then
+            echo -e "${RED}Звук не прошел. Сбрасываем настройки...${NC}"
+            [ "$OUT_TYPE" == "2" ] && bluetoothctl disconnect $BT_MAC
+            break # Возвращаемся в начало выбора (OUT_TYPE)
+        elif [ "$TEST_ANSWER" == "r" ]; then
+            continue # Повтор сигнала
+        fi
+    done
 done
 
-# 4. МИКРОФОН
+# 4. НАСТРОЙКА ВХОДА ЗВУКА (МИКРОФОН)
+echo -e "${BLUE}--- Настройка микрофона ---${NC}"
 arecord -l | grep 'card'
 read -p "Введите НОМЕР карты микрофона: " IN_CARD
 
-# 5. ПОЛЬЗОВАТЕЛЬ И ПАПКИ
-if ! id -u zix >/dev/null 2>&1; then sudo useradd -m zix; sudo usermod -aG audio,bluetooth zix; fi
-sudo mkdir -p /var/lib/mpd/music /opt/wyoming-satellite
+# 5. СОЗДАНИЕ ПОЛЬЗОВАТЕЛЯ И НАСТРОЙКА ПРАВ
+if ! id -u zix >/dev/null 2>&1; then
+    sudo useradd -m zix
+    sudo usermod -aG audio,video,bluetooth zix
+fi
+sudo mkdir -p /var/lib/mpd/music /var/lib/mpd/playlists /opt/wyoming-satellite
 sudo chown -R zix:audio /var/lib/mpd
-sudo chown zix:zix /opt/wyoming-satellite
+sudo chown -R zix:zix /opt/wyoming-satellite
 
-# 6. WYOMING VENV
-echo -e "${GREEN}Настройка Python окружения...${NC}"
+# 6. КОНФИГУРАЦИЯ MPD
+echo -e "${GREEN}[6/8] Настройка MPD сервера...${NC}"
+sudo bash -c "cat <<EOF > /etc/mpd.conf
+music_directory    \"/var/lib/mpd/music\"
+playlist_directory \"/var/lib/mpd/playlists\"
+db_file            \"/var/lib/mpd/tag_cache\"
+user               \"zix\"
+bind_to_address    \"0.0.0.0\"
+port               \"6600\"
+audio_output {
+    type    \"pulse\"
+    name    \"Zix Bluetooth Speaker\"
+}
+EOF"
+
+# 7. УСТАНОВКА И НАСТРОЙКА WYOMING SATELLITE (ГОЛОСОВОЙ ПОМОЩНИК)
+echo -e "${GREEN}[7/8] Создание виртуального окружения и установка Wyoming Satellite...${NC}"
 [ ! -d "/opt/wyoming-satellite/.venv" ] && sudo -u zix python3 -m venv /opt/wyoming-satellite/.venv
-sudo -u zix /opt/wyoming-satellite/.venv/bin/pip install --upgrade pip wyoming-satellite
+sudo -u zix /opt/wyoming-satellite/.venv/bin/pip install --upgrade pip
+sudo -u zix /opt/wyoming-satellite/.venv/bin/pip install wyoming-satellite
 
-# 7. СОЗДАНИЕ СЕРВИСА (БЕЗ ОБРЕЗАНИЯ)
-echo -e "${GREEN}Создание службы Wyoming...${NC}"
-sudo bash -c "cat > /etc/systemd/system/wyoming-satellite.service <<EOF
+echo -e "${GREEN}[7.1/8] Создание системной службы Wyoming...${NC}"
+# Используем экранирование обратных слешей для корректной записи многострочной команды
+sudo bash -c "cat <<EOF > /etc/systemd/system/wyoming-satellite.service
 [Unit]
 Description=Wyoming Satellite Zix
 After=network-online.target bluetooth.service pulseaudio.service
@@ -121,24 +189,15 @@ Restart=always
 WantedBy=multi-user.target
 EOF"
 
-# 8. MPD CONFIG
-sudo bash -c "cat > /etc/mpd.conf <<EOF
-music_directory \"/var/lib/mpd/music\"
-user \"zix\"
-bind_to_address \"0.0.0.0\"
-audio_output {
-    type \"pulse\"
-    name \"Zix Bluetooth\"
-}
-EOF"
-
-# ФИНАЛ
+# 8. ЗАПУСК ВСЕХ СЕРВИСОВ И ФИНАЛ
+echo -e "${GREEN}[8/8] Перезапуск системных служб...${NC}"
 sudo systemctl daemon-reload
-sudo systemctl enable bluetooth mpd wyoming-satellite
-sudo systemctl restart bluetooth mpd wyoming-satellite
+sudo systemctl enable bluetooth mpd wyoming-satellite gmediarender shairport-sync
+sudo systemctl restart bluetooth mpd wyoming-satellite gmediarender shairport-sync
 
 echo -e "${BLUE}====================================================${NC}"
-echo -e "${GREEN}Zix v$VERSION ГОТОВ!${NC}"
-echo -e "IP малинки: $(hostname -I | awk '{print $1}')"
-echo -e "Порт для HA: 10400"
+echo -e "${GREEN}Zix v$VERSION УСПЕШНО УСТАНОВЛЕН И НАСТРОЕН!${NC}"
+echo -e "IP адрес малинки: ${BLUE}$(hostname -I | awk '{print $1}')${NC}"
+echo -e "Порт для подключения в Home Assistant: ${BLUE}10400${NC}"
+echo -e "Теперь ты можешь добавить интеграцию Wyoming в HA."
 echo -e "${BLUE}====================================================${NC}"
