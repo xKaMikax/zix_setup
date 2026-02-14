@@ -1,10 +1,8 @@
 #!/bin/bash
 
 # =================================================================
-# VERSION="1.1.9"
-# ZIX ULTIMATE SMART SPEAKER - FULL EDITION
-# Стек: MPD, Spotify, AirPlay, Bluetooth, Voice Assistant
-# Фишка: Перебивание (Barge-in), Проверка звука, Автообновление
+VERSION="1.1.10"
+# ZIX ULTIMATE SMART SPEAKER - FIX SEARCH & VERSIONING
 # =================================================================
 
 GREEN='\033[0;32m'
@@ -15,7 +13,7 @@ NC='\033[0m'
 REPO_RAW_URL="https://raw.githubusercontent.com/xKaMikax/zix_setup/main/install.sh"
 LOCAL_FILE="install.sh"
 
-echo -e "${BLUE}--- Интеллектуальная система Zix ---${NC}"
+echo -e "${BLUE}--- Интеллектуальная система Zix v$VERSION ---${NC}"
 
 # 1. БЛОК АВТООБНОВЛЕНИЯ
 REMOTE_VERSION=$(wget -qO- "$REPO_RAW_URL" | grep -m 1 "VERSION=" | cut -d'"' -f2)
@@ -33,20 +31,24 @@ if [ ! -z "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION" != "$LOCAL_VERSION" ]; then
 fi
 
 # 2. ПОДГОТОВКА СИСТЕМЫ
-echo -e "${GREEN}[1/8] Установка и настройка системных пакетов...${NC}"
+echo -e "${GREEN}[1/8] Установка системных пакетов...${NC}"
 sudo apt update
 sudo apt install -y mpd mpc pulseaudio alsa-utils curl gmediarender \
 shairport-sync python3-pip python3-venv libasound2-dev \
 bluetooth bluez bluez-tools ffmpeg expect rfkill pulseaudio-module-bluetooth
 
-# Принудительный разблок радио и старт звука
+# Принудительный сброс Bluetooth перед работой
 sudo rfkill unblock all
-pulseaudio -k 2>/dev/null
-pulseaudio --start --exit-idle-time=-1
-sudo systemctl start bluetooth
+sudo systemctl restart bluetooth
+sudo bluetoothctl power off
+sleep 1
 sudo bluetoothctl power on
 sudo bluetoothctl agent on
 sudo bluetoothctl default-agent
+
+# Стартуем пульс
+pulseaudio -k 2>/dev/null
+pulseaudio --start --exit-idle-time=-1
 
 # 3. ЦИКЛ ВЫБОРА И ПРОВЕРКИ ЗВУКА
 while true; do
@@ -56,18 +58,28 @@ while true; do
     read -p "Твой выбор: " OUT_TYPE
 
     if [ "$OUT_TYPE" == "2" ]; then
-        echo -e "${BLUE}Поиск Bluetooth устройств (20 сек)...${NC}"
+        echo -e "${BLUE}Запуск сканирования (25 сек)... Переведи колонку в режим поиска!${NC}"
+        # Запускаем фоновое сканирование
         sudo bluetoothctl scan on > /dev/null &
         SCAN_PID=$!
-        sleep 20
+        
+        # Визуальный отсчет
+        for i in {25..1}; do
+            echo -ne "Ищу устройства... осталось $i сек. \r"
+            sleep 1
+        done
+        echo -e "\n"
+        
+        # Получаем список именно найденных (не только спаренных) устройств
+        devices=$(sudo bluetoothctl devices)
         kill $SCAN_PID 2>/dev/null
         
-        devices=$(sudo bluetoothctl devices)
         if [ -z "$devices" ]; then
-            echo -e "${RED}Устройства не найдены!${NC}"; continue
+            echo -e "${RED}Список пуст. Попробуй еще раз или проверь видимость колонки.${NC}"
+            continue
         fi
 
-        echo -e "${GREEN}Найдены устройства:${NC}"
+        echo -e "${GREEN}Найдено:${NC}"
         mapfile -t device_list <<< "$devices"
         for i in "${!device_list[@]}"; do echo "$i) ${device_list[$i]}"; done
         
@@ -75,7 +87,8 @@ while true; do
         BT_MAC=$(echo ${device_list[$DEV_INPUT]} | awk '{print $2}')
         
         echo -e "${BLUE}Подключаю $BT_MAC...${NC}"
-        sudo bluetoothctl remove $BT_MAC >/dev/null; sleep 2
+        sudo bluetoothctl remove $BT_MAC >/dev/null 2>&1
+        sleep 2
         sudo bluetoothctl pair $BT_MAC
         sudo bluetoothctl trust $BT_MAC
         sudo bluetoothctl connect $BT_MAC
@@ -88,37 +101,33 @@ while true; do
 
     # ПЕТЛЯ ПРОВЕРКИ ЗВУКА
     while true; do
-        echo -e "${BLUE}Слушай! Подаю звуковой сигнал на устройство...${NC}"
-        # Проигрываем синус 440Гц (нота Ля) в течение 2 секунд
+        echo -e "${BLUE}Подаю сигнал 440Гц на $OUT_DEVICE...${NC}"
         speaker-test -t sine -f 440 -l 1 -d $OUT_DEVICE > /dev/null 2>&1 &
         TEST_PID=$!
         sleep 3
         kill $TEST_PID 2>/dev/null
 
         echo -e "${GREEN}Ты слышал звук?${NC}"
-        echo "y - Да, всё работает"
-        echo "n - Нет, тишина (Вернуться к выбору устройств)"
-        echo "r - Не расслышал (Повторить сигнал)"
+        echo "y - Да | n - Нет (назад) | r - Повторить"
         read -p "Ответ: " TEST_ANSWER
 
         if [ "$TEST_ANSWER" == "y" ]; then
-            break 2 # Выходим из всех циклов настройки звука
+            break 2
         elif [ "$TEST_ANSWER" == "n" ]; then
-            echo -e "${RED}Звук не прошел. Сбрасываем...${NC}"
-            [ "$OUT_TYPE" == "2" ] && sudo bluetoothctl remove $BT_MAC
-            break # Возвращаемся в начало выбора (OUT_TYPE)
+            [ "$OUT_TYPE" == "2" ] && sudo bluetoothctl remove $BT_MAC >/dev/null 2>&1
+            break
         elif [ "$TEST_ANSWER" == "r" ]; then
-            continue # Повторяем speaker-test
+            continue
         fi
     done
 done
 
-# 4. НАСТРОЙКА МИКРОФОНА
-echo -e "${BLUE}--- Настройка входа звука (Микрофон) ---${NC}"
+# 4. МИКРОФОН
+echo -e "${BLUE}--- Микрофон ---${NC}"
 arecord -l | grep 'card'
 read -p "Введите НОМЕР карты микрофона: " IN_CARD
 
-# 5. ПОЛЬЗОВАТЕЛЬ И ПРАВА
+# 5. ПОЛЬЗОВАТЕЛЬ
 if ! id -u zix >/dev/null 2>&1; then
     sudo useradd -m zix
     sudo usermod -aG audio,video,bluetooth zix
@@ -126,7 +135,7 @@ fi
 sudo mkdir -p /var/lib/mpd/music /var/lib/mpd/playlists
 sudo chown -R zix:audio /var/lib/mpd
 
-# 6. КОНФИГУРАЦИЯ MPD
+# 6. MPD
 sudo tee /etc/mpd.conf > /dev/null <<EOF
 music_directory    "/var/lib/mpd/music"
 user               "zix"
@@ -138,8 +147,7 @@ audio_output {
 }
 EOF
 
-# 7. WYOMING SATELLITE (ZIX VOICE)
-echo -e "${GREEN}[7/8] Установка голосового движка...${NC}"
+# 7. WYOMING SATELLITE
 sudo mkdir -p /opt/wyoming-satellite
 sudo chown zix:zix /opt/wyoming-satellite
 [ ! -d "/opt/wyoming-satellite/.venv" ] && sudo -u zix python3 -m venv /opt/wyoming-satellite/.venv
@@ -152,7 +160,6 @@ After=network-online.target bluetooth.service pulseaudio.service
 [Service]
 Type=simple
 User=zix
-# ВАЖНО: Настройка SND для перебивания и DUCKING
 ExecStart=/opt/wyoming-satellite/.venv/bin/python3 -m wyoming_satellite \
     --name 'Zix' \
     --uri 'tcp://0.0.0.0:10400' \
@@ -167,13 +174,11 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-# 8. ЗАПУСК И ФИНАЛ
+# 8. СТАРТ
 sudo systemctl daemon-reload
 sudo systemctl enable bluetooth mpd wyoming-satellite gmediarender shairport-sync
 sudo systemctl restart bluetooth mpd wyoming-satellite gmediarender shairport-sync
 
 echo -e "${BLUE}====================================================${NC}"
-echo -e "${GREEN}Zix v$VERSION УСПЕШНО УСТАНОВЛЕН И ПРОВЕРЕН!${NC}"
-echo -e "Теперь Zix слышит тебя, умеет замолкать при обращении"
-echo -e "и транслирует звук на твою колонку."
+echo -e "${GREEN}Zix v$VERSION УСПЕШНО УСТАНОВЛЕН!${NC}"
 echo -e "${BLUE}====================================================${NC}"
