@@ -1,23 +1,19 @@
 #!/bin/bash
+# ZIX UNINSTALLER
 
-GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-echo -e "${RED}--- Удаление Zix Smart Speaker ---${NC}"
+echo -e "${RED}--- Полное удаление системы Zix ---${NC}"
 
-# 1. Остановка сервисов
-sudo systemctl stop wyoming-satellite mpd
-sudo systemctl disable wyoming-satellite mpd
+# Останавливаем всё
+sudo systemctl stop wyoming-satellite mpd gmediarender shairport-sync bluetooth
+sudo systemctl disable wyoming-satellite mpd gmediarender shairport-sync
 
-# 2. Удаление файлов
+# Удаляем сервис и папки
 sudo rm /etc/systemd/system/wyoming-satellite.service
 sudo rm -rf /opt/wyoming-satellite
 sudo rm /etc/mpd.conf
 
-# 3. Удаление пользователя (опционально)
-# sudo userdel zix
-
 sudo systemctl daemon-reload
-
-echo -e "${GREEN}Все компоненты Zix удалены.${NC}"
+echo "Zix успешно удален."
