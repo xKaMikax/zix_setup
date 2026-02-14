@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =================================================================
-# VERSION="1.1.0"
-# ZIX ULTIMATE - SMART SPEAKER & BT SCANNER
+# VERSION="1.1.1"
+# ZIX ULTIMATE - FIX: RF-KILL & BLUEALSA
 # Repo: https://github.com/xKaMikax/zix_setup
 # =================================================================
 
@@ -25,11 +25,16 @@ if [ ! -z "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION" != "$LOCAL_VERSION" ]; then
     exec "$LOCAL_FILE" "$@"
 fi
 
-# 1. ПАКЕТЫ
+# 1. ПАКЕТЫ (Исправлено: убран bluealsa, добавлен rfkill)
+echo -e "${GREEN}[1/9] Установка пакетов...${NC}"
 sudo apt update
 sudo apt install -y mpd mpc pulseaudio alsa-utils curl gmediarender \
-shairport-sync bluealsa python3-pip python3-venv libasound2-dev \
-bluetooth bluez bluez-tools ffmpeg expect
+shairport-sync python3-pip python3-venv libasound2-dev \
+bluetooth bluez bluez-tools ffmpeg expect rfkill
+
+# Снимаем блокировку Bluetooth (Fix: RF-kill)
+sudo rfkill unblock bluetooth
+sudo systemctl start bluetooth
 
 # 2. ВЫБОР УСТРОЙСТВА ВЫВОДА
 echo -e "${BLUE}--- Настройка звука Zix ---${NC}"
@@ -38,15 +43,17 @@ echo "2) Bluetooth колонка (Поиск и сопряжение)"
 read -p "Выбери тип вывода [1-2]: " OUT_TYPE
 
 if [ "$OUT_TYPE" == "2" ]; then
-    echo -e "${BLUE}Включаю Bluetooth и поиск устройств... (Жди 10 сек)${NC}"
-    sudo systemctl start bluetooth
-    sudo hciconfig hci0 up
+    echo -e "${BLUE}Включаю Bluetooth и поиск устройств... (Жди 15 сек)${NC}"
+    sudo hciconfig hci0 up 2>/dev/null
     
     # Сканирование
-    devices=$(bluetoothctl --timeout 10 scan on > /dev/null & sleep 10; bluetoothctl devices)
+    bluetoothctl --timeout 15 scan on > /dev/null & 
+    sleep 16
+    devices=$(bluetoothctl devices)
     
     if [ -z "$devices" ]; then
         echo -e "${RED}Устройства не найдены. Проверь, что колонка в режиме сопряжения!${NC}"
+        echo -e "${BLUE}Совет: если не находит, попробуй выполнить 'sudo rfkill unblock all'${NC}"
         exit 1
     fi
 
@@ -63,10 +70,13 @@ if [ "$OUT_TYPE" == "2" ]; then
 
     echo -e "${BLUE}Сопряжение с $BT_NAME ($BT_MAC)...${NC}"
     
-    # Автоматическое сопряжение через bluetoothctl
-    printf "pair $BT_MAC\ntrust $BT_MAC\nconnect $BT_MAC\nquit" | bluetoothctl
+    # Автоматическое сопряжение
+    bluetoothctl pair $BT_MAC
+    bluetoothctl trust $BT_MAC
+    bluetoothctl connect $BT_MAC
     
-    OUT_DEVICE="bluealsa:SRV=org.bluealsa,DEV=$BT_MAC,PROFILE=a2dp"
+    # Для новых систем используем PulseAudio как мост
+    OUT_DEVICE="pulse"
     echo -e "${GREEN}Успешно подключено к $BT_NAME!${NC}"
 else
     aplay -l | grep 'card'
@@ -85,21 +95,19 @@ if ! id -u zix >/dev/null 2>&1; then
     sudo usermod -aG audio,video,bluetooth zix
 fi
 
-# 4. MPD CONFIG
+# 4. MPD CONFIG (Используем PulseAudio для универсальности)
 sudo tee /etc/mpd.conf > /dev/null <<EOF
 music_directory    "/var/lib/mpd/music"
 user               "zix"
 bind_to_address    "0.0.0.0"
 port               "6600"
 audio_output {
-    type    "alsa"
+    type    "pulse"
     name    "Zix Speaker"
-    device  "$OUT_DEVICE"
-    mixer_type "software"
 }
 EOF
 
-# 5. WYOMING (ГОЛОС) С ПРИГЛУШЕНИЕМ
+# 5. WYOMING (ГОЛОС)
 sudo mkdir -p /opt/wyoming-satellite
 sudo chown zix:zix /opt/wyoming-satellite
 [ ! -d "/opt/wyoming-satellite/.venv" ] && sudo -u zix python3 -m venv /opt/wyoming-satellite/.venv
@@ -108,7 +116,7 @@ sudo -u zix /opt/wyoming-satellite/.venv/bin/pip install --upgrade pip wyoming-s
 sudo tee /etc/systemd/system/wyoming-satellite.service > /dev/null <<EOF
 [Unit]
 Description=Wyoming Satellite Zix
-After=network-online.target bluetooth.service
+After=network-online.target bluetooth.service pulseaudio.service
 [Service]
 Type=simple
 User=zix
@@ -131,5 +139,4 @@ sudo systemctl daemon-reload
 sudo systemctl enable bluetooth mpd wyoming-satellite gmediarender shairport-sync
 sudo systemctl restart bluetooth mpd wyoming-satellite gmediarender shairport-sync
 
-echo -e "${GREEN}Установка завершена! Версия: $LOCAL_VERSION${NC}"
-echo -e "Zix работает через: $OUT_DEVICE"
+echo -e "${GREEN}Установка завершена! Zix готов к работе.${NC}"
