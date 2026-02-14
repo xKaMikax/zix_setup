@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =================================================================
-# VERSION="1.8.1"
+# VERSION="1.1.9"
 # ZIX ULTIMATE SMART SPEAKER - FULL EDITION
 # Стек: MPD, Spotify, AirPlay, Bluetooth, Voice Assistant
 # Фишка: Перебивание (Barge-in), Проверка звука, Автообновление
