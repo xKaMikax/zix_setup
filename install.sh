@@ -1,9 +1,10 @@
 #!/bin/bash
 
 # =================================================================
-# VERSION="1.1.7"
-# ZIX ULTIMATE - FIX: BT CONNECTION PROFILE
-# Repo: https://github.com/xKaMikax/zix_setup
+# VERSION="1.1.8"
+# ZIX ULTIMATE SMART SPEAKER - FULL EDITION
+# Стек: MPD, Spotify, AirPlay, Bluetooth, Voice Assistant
+# Фишка: Перебивание (Barge-in), Проверка звука, Автообновление
 # =================================================================
 
 GREEN='\033[0;32m'
@@ -14,97 +15,131 @@ NC='\033[0m'
 REPO_RAW_URL="https://raw.githubusercontent.com/xKaMikax/zix_setup/main/install.sh"
 LOCAL_FILE="install.sh"
 
-echo -e "${BLUE}--- Система Zix: Обновление ---${NC}"
+echo -e "${BLUE}--- Интеллектуальная система Zix ---${NC}"
 
-# --- ОБНОВЛЕНИЕ ---
+# 1. БЛОК АВТООБНОВЛЕНИЯ
 REMOTE_VERSION=$(wget -qO- "$REPO_RAW_URL" | grep -m 1 "VERSION=" | cut -d'"' -f2)
-LOCAL_VERSION=$(grep -m 1 "VERSION=" "$LOCAL_FILE" | cut -d'"' -f2)
-
-if [ ! -z "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION" != "$LOCAL_VERSION" ]; then
-    wget -qO "$LOCAL_FILE" "$REPO_RAW_URL" && chmod +x "$LOCAL_FILE" && exec ./"$LOCAL_FILE"
+if [ -f "$LOCAL_FILE" ]; then
+    LOCAL_VERSION=$(grep -m 1 "VERSION=" "$LOCAL_FILE" | cut -d'"' -f2)
+else
+    LOCAL_VERSION="0.0.0"
 fi
 
-# 1. ПОДГОТОВКА ПУЛЬСА (Fix для Bluetooth профилей)
-echo -e "${GREEN}[1/8] Настройка звуковых модулей...${NC}"
-sudo apt update && sudo apt install -y pulseaudio-module-bluetooth rfkill
+if [ ! -z "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION" != "$LOCAL_VERSION" ]; then
+    echo -e "${GREEN}Обнаружена новая версия $REMOTE_VERSION. Обновляюсь...${NC}"
+    wget -qO "$LOCAL_FILE" "$REPO_RAW_URL"
+    chmod +x "$LOCAL_FILE"
+    exec ./"$LOCAL_FILE"
+fi
+
+# 2. ПОДГОТОВКА СИСТЕМЫ
+echo -e "${GREEN}[1/8] Установка и настройка системных пакетов...${NC}"
+sudo apt update
+sudo apt install -y mpd mpc pulseaudio alsa-utils curl gmediarender \
+shairport-sync python3-pip python3-venv libasound2-dev \
+bluetooth bluez bluez-tools ffmpeg expect rfkill pulseaudio-module-bluetooth
+
+# Принудительный разблок радио и старт звука
 sudo rfkill unblock all
 pulseaudio -k 2>/dev/null
 pulseaudio --start --exit-idle-time=-1
-
-# Пробуждаем BT
+sudo systemctl start bluetooth
 sudo bluetoothctl power on
 sudo bluetoothctl agent on
 sudo bluetoothctl default-agent
 
-echo -e "${BLUE}--- Настройка звука Zix ---${NC}"
-echo "1) Провод / USB / HDMI"
-echo "2) Bluetooth колонка"
-read -p "Выбор: " OUT_TYPE
+# 3. ЦИКЛ ВЫБОРА И ПРОВЕРКИ ЗВУКА
+while true; do
+    echo -e "${BLUE}--- Настройка вывода звука ---${NC}"
+    echo "1) Провод / USB / HDMI"
+    echo "2) Bluetooth колонка (YM-069)"
+    read -p "Твой выбор: " OUT_TYPE
 
-if [ "$OUT_TYPE" == "2" ]; then
-    while true; do
-        echo -e "${BLUE}Поиск устройств...${NC}"
+    if [ "$OUT_TYPE" == "2" ]; then
+        echo -e "${BLUE}Поиск Bluetooth устройств (15 сек)...${NC}"
         sudo bluetoothctl scan on > /dev/null &
         SCAN_PID=$!
         sleep 15
         kill $SCAN_PID 2>/dev/null
         
         devices=$(sudo bluetoothctl devices)
-        
         if [ -z "$devices" ]; then
-            echo -e "${RED}Ничего не нашел.${NC}"
-            echo "1) Еще раз | 2) Пропустить"
-            read -p ">> " BT_CHOICE
-            [ "$BT_CHOICE" == "2" ] && OUT_DEVICE="pulse" && break
-        else
-            echo -e "${GREEN}Найдены устройства:${NC}"
-            mapfile -t device_list <<< "$devices"
-            for i in "${!device_list[@]}"; do echo "$i) ${device_list[$i]}"; done
+            echo -e "${RED}Устройства не найдены!${NC}"; continue
+        fi
 
-            read -p "Номер устройства: " DEV_INPUT
-            BT_MAC=$(echo ${device_list[$DEV_INPUT]} | awk '{print $2}')
-            
-            echo -e "${BLUE}Подключаю $BT_MAC...${NC}"
-            # Сначала удаляем старое сопряжение если оно глючит
-            sudo bluetoothctl remove $BT_MAC > /dev/null
-            sleep 2
-            sudo bluetoothctl pair $BT_MAC
-            sudo bluetoothctl trust $BT_MAC
-            sudo bluetoothctl connect $BT_MAC
-            
-            OUT_DEVICE="pulse"
-            break
+        echo -e "${GREEN}Найдены устройства:${NC}"
+        mapfile -t device_list <<< "$devices"
+        for i in "${!device_list[@]}"; do echo "$i) ${device_list[$i]}"; done
+        
+        read -p "Выбери номер устройства: " DEV_INPUT
+        BT_MAC=$(echo ${device_list[$DEV_INPUT]} | awk '{print $2}')
+        
+        echo -e "${BLUE}Подключаю $BT_MAC...${NC}"
+        sudo bluetoothctl remove $BT_MAC >/dev/null; sleep 2
+        sudo bluetoothctl pair $BT_MAC
+        sudo bluetoothctl trust $BT_MAC
+        sudo bluetoothctl connect $BT_MAC
+        OUT_DEVICE="pulse"
+    else
+        aplay -l | grep 'card'
+        read -p "Введите НОМЕР карты вывода (обычно 0): " CARD_ID
+        OUT_DEVICE="hw:$CARD_ID,0"
+    fi
+
+    # ПЕТЛЯ ПРОВЕРКИ ЗВУКА
+    while true; do
+        echo -e "${BLUE}Слушай! Подаю звуковой сигнал на устройство...${NC}"
+        # Проигрываем синус 440Гц (нота Ля) в течение 2 секунд
+        speaker-test -t sine -f 440 -l 1 -d $OUT_DEVICE > /dev/null 2>&1 &
+        TEST_PID=$!
+        sleep 3
+        kill $TEST_PID 2>/dev/null
+
+        echo -e "${GREEN}Ты слышал звук?${NC}"
+        echo "y - Да, всё работает"
+        echo "n - Нет, тишина (Вернуться к выбору устройств)"
+        echo "r - Не расслышал (Повторить сигнал)"
+        read -p "Ответ: " TEST_ANSWER
+
+        if [ "$TEST_ANSWER" == "y" ]; then
+            break 2 # Выходим из всех циклов настройки звука
+        elif [ "$TEST_ANSWER" == "n" ]; then
+            echo -e "${RED}Звук не прошел. Сбрасываем...${NC}"
+            [ "$OUT_TYPE" == "2" ] && sudo bluetoothctl remove $BT_MAC
+            break # Возвращаемся в начало выбора (OUT_TYPE)
+        elif [ "$TEST_ANSWER" == "r" ]; then
+            continue # Повторяем speaker-test
         fi
     done
-else
-    aplay -l | grep 'card'
-    read -p "Номер карты вывода: " CARD_ID
-    OUT_DEVICE="hw:$CARD_ID,0"
-fi
+done
 
-# 2. МИКРОФОН
-echo ""
+# 4. НАСТРОЙКА МИКРОФОНА
+echo -e "${BLUE}--- Настройка входа звука (Микрофон) ---${NC}"
 arecord -l | grep 'card'
-read -p "Номер карты МИКРОФОНА: " IN_CARD
+read -p "Введите НОМЕР карты микрофона: " IN_CARD
 
-# 3. ПОЛЬЗОВАТЕЛЬ И КОНФИГИ
+# 5. ПОЛЬЗОВАТЕЛЬ И ПРАВА
 if ! id -u zix >/dev/null 2>&1; then
     sudo useradd -m zix
     sudo usermod -aG audio,video,bluetooth zix
 fi
+sudo mkdir -p /var/lib/mpd/music /var/lib/mpd/playlists
+sudo chown -R zix:audio /var/lib/mpd
 
-# MPD
+# 6. КОНФИГУРАЦИЯ MPD
 sudo tee /etc/mpd.conf > /dev/null <<EOF
 music_directory    "/var/lib/mpd/music"
 user               "zix"
 bind_to_address    "0.0.0.0"
+port               "6600"
 audio_output {
     type    "pulse"
     name    "Zix Speaker"
 }
 EOF
 
-# Wyoming (Zix)
+# 7. WYOMING SATELLITE (ZIX VOICE)
+echo -e "${GREEN}[7/8] Установка голосового движка...${NC}"
 sudo mkdir -p /opt/wyoming-satellite
 sudo chown zix:zix /opt/wyoming-satellite
 [ ! -d "/opt/wyoming-satellite/.venv" ] && sudo -u zix python3 -m venv /opt/wyoming-satellite/.venv
@@ -117,21 +152,28 @@ After=network-online.target bluetooth.service pulseaudio.service
 [Service]
 Type=simple
 User=zix
+# ВАЖНО: Настройка SND для перебивания и DUCKING
 ExecStart=/opt/wyoming-satellite/.venv/bin/python3 -m wyoming_satellite \
     --name 'Zix' \
     --uri 'tcp://0.0.0.0:10400' \
     --mic-command 'arecord -D hw:$IN_CARD,0 -r 16000 -c 1 -f S16_LE -t raw' \
     --snd-command 'aplay -D $OUT_DEVICE -r 22050 -c 1 -f S16_LE -t raw' \
     --ducking-volume 0.2 \
+    --auto-gain 7 \
+    --noise-suppression 3 \
     --allow-discovery
 Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# ЗАПУСК
+# 8. ЗАПУСК И ФИНАЛ
 sudo systemctl daemon-reload
 sudo systemctl enable bluetooth mpd wyoming-satellite gmediarender shairport-sync
 sudo systemctl restart bluetooth mpd wyoming-satellite gmediarender shairport-sync
 
-echo -e "${GREEN}Zix v1.1.7 готов! Если звука нет, проверь HA.${NC}"
+echo -e "${BLUE}====================================================${NC}"
+echo -e "${GREEN}Zix v$VERSION УСПЕШНО УСТАНОВЛЕН И ПРОВЕРЕН!${NC}"
+echo -e "Теперь Zix слышит тебя, умеет замолкать при обращении"
+echo -e "и транслирует звук на твою колонку."
+echo -e "${BLUE}====================================================${NC}"
