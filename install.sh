@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =================================================================
-# VERSION="1.1.5"
-# ZIX ULTIMATE - FORCE BT POWER & DISCOVERY
+# VERSION="1.1.6"
+# ZIX ULTIMATE - BT SCAN WITH SKIP OPTION
 # Repo: https://github.com/xKaMikax/zix_setup
 # =================================================================
 
@@ -25,55 +25,114 @@ fi
 # [Подготовка]
 sudo rfkill unblock all
 sudo systemctl start bluetooth
-# Ждем инициализации драйвера
-sleep 2
-
-# Пробуждаем контроллер программно
-echo -e "${BLUE}Активация контроллера Bluetooth...${NC}"
 sudo bluetoothctl power on
 sudo bluetoothctl agent on
 sudo bluetoothctl default-agent
 
 echo -e "${BLUE}--- Настройка звука Zix ---${NC}"
-echo "1) Провод / USB"
+echo "1) Провод / USB / HDMI"
 echo "2) Bluetooth колонка"
 read -p "Выбор: " OUT_TYPE
 
 if [ "$OUT_TYPE" == "2" ]; then
-    echo -e "${BLUE}Поиск устройств Zix (20 сек)... Включи на колонке поиск!${NC}"
-    
-    # Запускаем сканирование в фоне
-    sudo bluetoothctl --timeout 20 scan on > /dev/null &
-    sleep 21
-    
-    devices=$(sudo bluetoothctl devices)
-    
-    if [ -z "$devices" ]; then
-        echo -e "${RED}Устройства всё еще не найдены.${NC}"
-        echo -e "${BLUE}Попробуй выполнить команду:${NC} bluetoothctl show"
-        echo -e "Если там написано 'Powered: no', значит адаптер спит."
-        exit 1
-    fi
+    while true; do
+        echo -e "${BLUE}Поиск устройств (20 сек)... Переведи колонку в режим сопряжения!${NC}"
+        sudo bluetoothctl scan on > /dev/null &
+        SCAN_PID=$!
+        sleep 20
+        kill $SCAN_PID 2>/dev/null
+        
+        devices=$(sudo bluetoothctl devices)
+        
+        if [ -z "$devices" ]; then
+            echo -e "${RED}Устройства не найдены.${NC}"
+            echo "1) Попробовать еще раз"
+            echo "2) Пропустить и использовать проводной выход (Default)"
+            read -p "Что делаем? [1-2]: " BT_CHOICE
+            
+            if [ "$BT_CHOICE" == "2" ]; then
+                OUT_DEVICE="pulse" # Переключаем на Pulse по умолчанию
+                echo -e "${BLUE}Пропускаем... Звук будет настроен на системный выход.${NC}"
+                break
+            fi
+            # Если выбрали 1, цикл начнется сначала
+        else
+            echo -e "${GREEN}Найденные устройства:${NC}"
+            mapfile -t device_list <<< "$devices"
+            for i in "${!device_list[@]}"; do
+                echo "$i) ${device_list[$i]}"
+            done
 
-    echo -e "${GREEN}Найденные устройства:${NC}"
-    mapfile -t device_list <<< "$devices"
-    for i in "${!device_list[@]}"; do
-        echo "$i) ${device_list[$i]}"
+            read -p "Выбери номер устройства (или 's' чтобы пропустить): " DEV_INPUT
+            if [ "$DEV_INPUT" == "s" ]; then
+                OUT_DEVICE="pulse"
+                break
+            fi
+            
+            BT_MAC=$(echo ${device_list[$DEV_INPUT]} | awk '{print $2}')
+            echo -e "${BLUE}Сопряжение с $BT_MAC...${NC}"
+            sudo bluetoothctl pair $BT_MAC
+            sudo bluetoothctl trust $BT_MAC
+            sudo bluetoothctl connect $BT_MAC
+            OUT_DEVICE="pulse"
+            break
+        fi
     done
-
-    read -p "Выбери номер: " DEV_NUM
-    BT_MAC=$(echo ${device_list[$DEV_NUM]} | awk '{print $2}')
-    
-    echo -e "${BLUE}Сопряжение с $BT_MAC...${NC}"
-    sudo bluetoothctl pair $BT_MAC
-    sudo bluetoothctl trust $BT_MAC
-    sudo bluetoothctl connect $BT_MAC
-    OUT_DEVICE="pulse"
 else
-    # [Тут старый код для проводного вывода]
     aplay -l | grep 'card'
-    read -p "Номер карты: " CARD_ID
+    read -p "Введите номер карты вывода: " CARD_ID
     OUT_DEVICE="hw:$CARD_ID,0"
 fi
 
-# ... [Остальной код (Пользователь, MPD, Wyoming) остается прежним] ...
+# --- ДАЛЬШЕ СТАНДАРТНАЯ УСТАНОВКА ---
+echo -e "${GREEN}[5/8] Настройка пользователя и сервисов...${NC}"
+if ! id -u zix >/dev/null 2>&1; then
+    sudo useradd -m zix
+    sudo usermod -aG audio,video,bluetooth zix
+fi
+
+# Настройка MPD
+sudo tee /etc/mpd.conf > /dev/null <<EOF
+music_directory    "/var/lib/mpd/music"
+user               "zix"
+bind_to_address    "0.0.0.0"
+audio_output {
+    type    "pulse"
+    name    "Zix Speaker"
+}
+EOF
+
+# Настройка Wyoming (Голос)
+sudo mkdir -p /opt/wyoming-satellite
+sudo chown zix:zix /opt/wyoming-satellite
+[ ! -d "/opt/wyoming-satellite/.venv" ] && sudo -u zix python3 -m venv /opt/wyoming-satellite/.venv
+sudo -u zix /opt/wyoming-satellite/.venv/bin/pip install --upgrade pip wyoming-satellite
+
+# Определение микрофона (если не задан)
+arecord -l | grep 'card'
+read -p "Номер карты микрофона: " IN_CARD
+
+sudo tee /etc/systemd/system/wyoming-satellite.service > /dev/null <<EOF
+[Unit]
+Description=Wyoming Satellite Zix
+After=network-online.target bluetooth.service pulseaudio.service
+[Service]
+Type=simple
+User=zix
+ExecStart=/opt/wyoming-satellite/.venv/bin/python3 -m wyoming_satellite \
+    --name 'Zix' \
+    --uri 'tcp://0.0.0.0:10400' \
+    --mic-command 'arecord -D hw:$IN_CARD,0 -r 16000 -c 1 -f S16_LE -t raw' \
+    --snd-command 'aplay -D $OUT_DEVICE -r 22050 -c 1 -f S16_LE -t raw' \
+    --ducking-volume 0.2 \
+    --allow-discovery
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable bluetooth mpd wyoming-satellite gmediarender shairport-sync
+sudo systemctl restart bluetooth mpd wyoming-satellite gmediarender shairport-sync
+
+echo -e "${GREEN}Установка Zix завершена!${NC}"
