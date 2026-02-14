@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =================================================================
-# VERSION="1.1.8"
+# VERSION="1.8.1"
 # ZIX ULTIMATE SMART SPEAKER - FULL EDITION
 # Стек: MPD, Spotify, AirPlay, Bluetooth, Voice Assistant
 # Фишка: Перебивание (Barge-in), Проверка звука, Автообновление
@@ -52,14 +52,14 @@ sudo bluetoothctl default-agent
 while true; do
     echo -e "${BLUE}--- Настройка вывода звука ---${NC}"
     echo "1) Провод / USB / HDMI"
-    echo "2) Bluetooth колонка (YM-069)"
+    echo "2) Bluetooth колонка"
     read -p "Твой выбор: " OUT_TYPE
 
     if [ "$OUT_TYPE" == "2" ]; then
-        echo -e "${BLUE}Поиск Bluetooth устройств (15 сек)...${NC}"
+        echo -e "${BLUE}Поиск Bluetooth устройств (20 сек)...${NC}"
         sudo bluetoothctl scan on > /dev/null &
         SCAN_PID=$!
-        sleep 15
+        sleep 20
         kill $SCAN_PID 2>/dev/null
         
         devices=$(sudo bluetoothctl devices)
